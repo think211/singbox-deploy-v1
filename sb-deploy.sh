@@ -1751,6 +1751,7 @@ do_uninstall() {
   # 删除文件
   rm -f "${BIN_PATH}" 2>/dev/null || log_warn "删除 ${BIN_PATH} 失败"
   rm -f "${SERVICE_FILE}" 2>/dev/null || log_warn "删除 ${SERVICE_FILE} 失败"
+  rm -f /usr/local/bin/sb 2>/dev/null || true
 
   systemctl daemon-reload 2>/dev/null || true
   systemctl reset-failed 2>/dev/null || true
@@ -1930,6 +1931,11 @@ main() {
 
   # 保存安装状态
   save_install_state
+
+  # 创建全局快捷管理命令 'sb'，方便以后在任意目录下输入 sb 直接打开管理面板
+  log_info "正在创建全局快捷管理命令 'sb'..."
+  cp "$0" /usr/local/bin/sb 2>/dev/null && chmod +x /usr/local/bin/sb 2>/dev/null || \
+    log_warn "创建全局快捷管理命令 'sb' 失败（可能缺少写入权限）"
 
   # 步骤 24：输出安装结果
   print_install_summary  # §12 / §14.2 / §11.6
