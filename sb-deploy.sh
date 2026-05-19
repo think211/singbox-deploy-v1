@@ -655,6 +655,8 @@ generate_server_config() {
     {
       "type": "vless",
       "tag": "vless-in",
+      "sniff": true,
+      "sniff_override_destination": true,
       "listen": "${LISTEN_ADDR}",
       "listen_port": ${LISTEN_PORT},
       "users": [
@@ -683,7 +685,8 @@ generate_server_config() {
   "outbounds": [
     {
       "type": "direct",
-      "tag": "direct"
+      "tag": "direct",
+      "domain_strategy": "prefer_ipv4"
     },
     {
       "type": "block",
