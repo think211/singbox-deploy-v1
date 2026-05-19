@@ -242,6 +242,43 @@ check_and_install_deps() {
 }
 
 # ==============================================================
+# §2.5  BBR 拥塞控制优化
+# ==============================================================
+
+optimize_bbr() {
+  log_step "优化 BBR 拥塞控制"
+
+  if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
+    log_info "检测到系统已启用 BBR 拥塞控制算法"
+    return 0
+  fi
+
+  echo -e "${YELLOW}检测到系统未启用 BBR。开启 BBR 可极大提升 5G/移动网络在丢包情况下的连接速度 and 稳定性。${NC}"
+  echo -ne "是否自动开启系统的内置 BBR 加速？(建议开启) [Y/n]："
+  read -r enable_bbr
+  enable_bbr="${enable_bbr:-y}"
+
+  if [[ "${enable_bbr}" =~ ^[Yy]$ ]]; then
+    log_info "正在写入配置开启 BBR..."
+    if ! grep -q "net.core.default_qdisc" /etc/sysctl.conf; then
+      echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "net.ipv4.tcp_congestion_control" /etc/sysctl.conf; then
+      echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    fi
+    sysctl -p >/dev/null 2>&1 || true
+
+    if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
+      log_info "BBR 加速开启成功！"
+    else
+      log_warn "开启 BBR 加速失败，请检查系统内核是否支持内置 BBR"
+    fi
+  else
+    log_info "已跳过 BBR 优化"
+  fi
+}
+
+# ==============================================================
 # §3  网络检测
 # ==============================================================
 
@@ -655,8 +692,6 @@ generate_server_config() {
     {
       "type": "vless",
       "tag": "vless-in",
-      "sniff": true,
-      "sniff_override_destination": true,
       "listen": "${LISTEN_ADDR}",
       "listen_port": ${LISTEN_PORT},
       "users": [
@@ -685,8 +720,7 @@ generate_server_config() {
   "outbounds": [
     {
       "type": "direct",
-      "tag": "direct",
-      "domain_strategy": "prefer_ipv4"
+      "tag": "direct"
     },
     {
       "type": "block",
@@ -725,7 +759,7 @@ _build_vless_link() {
     addr="[${addr}]"
   fi
   local tag="SB-${addr}:${LISTEN_PORT}"
-  echo "vless://${UUID_VAL}@${addr}:${LISTEN_PORT}?security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&flow=xtls-rprx-vision&type=tcp#${tag}"
+  echo "vless://${UUID_VAL}@${addr}:${LISTEN_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${tag}"
 }
 
 generate_client_configs() {
@@ -1850,6 +1884,9 @@ main() {
 
   # 步骤 6：依赖检测与安装
   check_and_install_deps  # §19
+
+  # 步骤 6.5：优化 BBR 拥塞控制
+  optimize_bbr
 
   # 初始化目录结构
   init_dirs
