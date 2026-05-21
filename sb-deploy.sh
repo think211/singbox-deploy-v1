@@ -1692,20 +1692,24 @@ menu_backup() {
 menu_restore_backup() {
   log_step "恢复上一个备份"
 
-  if [[ ! -f "${BACKUP_DIR}/server.json.bak" ]]; then
-    log_error "未找到备份（${BACKUP_DIR}/server.json.bak 不存在）"
+  local latest_snapshot
+  latest_snapshot=$(ls -dt "${BACKUP_DIR}"/snapshot_* 2>/dev/null | head -1)
+
+  if [[ -z "${latest_snapshot}" ]]; then
+    log_error "未找到备份快照（${BACKUP_DIR}/snapshot_* 不存在，请先使用菜单 15 创建备份）"
     return 1
   fi
 
-  echo -ne "确认恢复到上一个备份？当前配置将被覆盖。[y/N]："
+  echo -e "将恢复的备份：$(basename "${latest_snapshot}")"
+  echo -ne "确认恢复？当前配置将被覆盖。[y/N]："
   read -r confirm
   [[ "${confirm}" =~ ^[Yy]$ ]] || { echo "已取消"; return 0; }
 
   systemctl stop sing-box 2>/dev/null || true
 
-  cp "${BACKUP_DIR}/server.json.bak"  "${SERVER_JSON}"  2>/dev/null || true
-  cp "${BACKUP_DIR}/vless.json.bak"   "${VLESS_CRED}"   2>/dev/null || true
-  cp "${BACKUP_DIR}/reality.json.bak" "${REALITY_CRED}" 2>/dev/null || true
+  [[ -f "${latest_snapshot}/server.json" ]]  && cp "${latest_snapshot}/server.json"  "${SERVER_JSON}"  2>/dev/null || true
+  [[ -f "${latest_snapshot}/vless.json" ]]   && cp "${latest_snapshot}/vless.json"   "${VLESS_CRED}"   2>/dev/null || true
+  [[ -f "${latest_snapshot}/reality.json" ]] && cp "${latest_snapshot}/reality.json" "${REALITY_CRED}" 2>/dev/null || true
 
   if ! "${BIN_PATH}" check -c "${SERVER_JSON}" 2>/dev/null; then
     log_error "备份配置校验失败，请手动检查 ${SERVER_JSON}"
@@ -1716,8 +1720,8 @@ menu_restore_backup() {
   sleep 2
 
   if systemctl is-active --quiet sing-box; then
-    log_info "备份已恢复，服务已重启"
-    log_audit "从备份恢复配置"
+    log_info "备份已恢复（$(basename "${latest_snapshot}")），服务已重启"
+    log_audit "从备份快照恢复配置：${latest_snapshot}"
   else
     log_error "恢复后服务未能启动，请检查日志"
     return ${E_SERVICE}
