@@ -792,6 +792,28 @@ generate_client_configs() {
   "log": {
     "level": "info"
   },
+  "dns": {
+    "servers": [
+      {
+        "tag": "dns-direct",
+        "address": "https://dns.alidns.com/dns-query",
+        "detour": "direct"
+      },
+      {
+        "tag": "dns-proxy",
+        "address": "https://dns.cloudflare.com/dns-query",
+        "detour": "vless-out"
+      }
+    ],
+    "rules": [
+      {
+        "geosite": ["cn"],
+        "server": "dns-direct"
+      }
+    ],
+    "final": "dns-proxy",
+    "strategy": "prefer_ipv4"
+  },
   "inbounds": [
     {
       "type": "mixed",
@@ -836,9 +858,18 @@ generate_client_configs() {
       {
         "ip_is_private": true,
         "outbound": "direct"
+      },
+      {
+        "geosite": ["cn"],
+        "outbound": "direct"
+      },
+      {
+        "geoip": ["cn"],
+        "outbound": "direct"
       }
     ],
-    "final": "vless-out"
+    "final": "vless-out",
+    "auto_detect_interface": true
   }
 }
 EOF
@@ -852,6 +883,23 @@ mixed-port: 7890
 allow-lan: false
 mode: rule
 log-level: info
+ipv6: false
+
+dns:
+  enable: true
+  listen: 127.0.0.1:1053
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+  nameserver-policy:
+    "geosite:cn": [https://dns.alidns.com/dns-query, https://doh.pub/dns-query]
+    "geosite:geolocation-!cn": [https://dns.cloudflare.com/dns-query, https://dns.google/dns-query]
 
 proxies:
   - name: "${node_name}"
@@ -861,6 +909,7 @@ proxies:
     uuid: ${UUID_VAL}
     network: tcp
     tls: true
+    udp: true
     flow: xtls-rprx-vision
     servername: ${SNI}
     reality-opts:
@@ -881,6 +930,8 @@ rules:
   - IP-CIDR,192.168.0.0/16,DIRECT
   - IP-CIDR,127.0.0.0/8,DIRECT
   - GEOIP,private,DIRECT
+  - GEOSITE,cn,DIRECT
+  - GEOIP,cn,DIRECT
   - MATCH,Proxy
 EOF
 
