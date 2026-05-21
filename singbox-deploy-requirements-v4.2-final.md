@@ -441,8 +441,8 @@ sing-box 服务：运行中
 ## 19. 依赖要求
 
 ### 19.1 最小依赖
-curl 或 wget、tar、gzip、openssl、qrencode、systemd。
-可选：jq、unzip。
+curl 或 wget、tar、gzip、openssl、jq、qrencode、systemd。
+可选：unzip。
 不默认安装：nginx、apache、caddy、cloudflared、warp、docker、python、nodejs。
 
 ---

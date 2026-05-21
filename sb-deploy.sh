@@ -84,6 +84,7 @@ SHORT_ID=""
 IPV4_ADDR=""
 IPV6_ADDR=""
 SB_ARCH=""
+DOMAIN_STRATEGY="prefer_ipv4"
 
 # ==============================================================
 # §0  日志基础设施
@@ -214,7 +215,7 @@ check_and_install_deps() {
   log_step "检测并安装依赖"
 
   local missing=()
-  for cmd in curl tar gzip openssl; do
+  for cmd in curl tar gzip openssl jq; do
     if ! command -v "${cmd}" &>/dev/null; then
       missing+=("${cmd}")
     fi
@@ -321,10 +322,12 @@ detect_ip() {
         log_info "IPv6 不可用，降级为 0.0.0.0 监听"
       fi
     fi
+    DOMAIN_STRATEGY="prefer_ipv4"
   else
     # 纯 IPv6 VPS
     SERVER_IP="${IPV6_ADDR}"
     LISTEN_ADDR="::"
+    DOMAIN_STRATEGY="prefer_ipv6"
     log_info "纯 IPv6 VPS，SERVER_IP 使用 IPv6"
   fi
 
@@ -458,10 +461,10 @@ prompt_sni() {
 
   echo -e "\n${CYAN}Reality SNI 是 sing-box 用于伪装流量的目标 HTTPS 站点域名。${NC}"
   echo -e "要求：真实可访问的 HTTPS 站点，支持 TLS 1.3，境外大厂为佳。"
-  echo -e "推荐：${BOLD}www.apple.com${NC}（默认）、www.microsoft.com、www.cloudflare.com"
+  echo -e "推荐：${BOLD}apple.com${NC}（默认）、www.microsoft.com、www.cloudflare.com"
   echo ""
 
-  local default_sni="www.apple.com"
+  local default_sni="apple.com"
 
   while true; do
     echo -ne "请输入 Reality SNI（直接回车使用默认值 ${BOLD}${default_sni}${NC}）："
@@ -482,17 +485,9 @@ prompt_sni() {
 # §5  sing-box 下载与安装
 # ==============================================================
 
-_get_latest_stable_version() {
-  # 从 GitHub Releases API 获取最新非预发布版本
-  local latest
-  latest=$(curl -s --max-time 15 \
-    "https://api.github.com/repos/SagerNet/sing-box/releases" 2>/dev/null | \
-    grep '"tag_name"' | \
-    grep -v '"tag_name": "v.*-\(alpha\|beta\|rc\)' | \
-    head -1 | \
-    sed 's/.*"v\([^"]*\)".*/\1/') 2>/dev/null || true
-
-  echo "${latest:-${SB_PINNED_VERSION}}"
+_get_target_stable_version() {
+  # M1 只更新到脚本已验证的固定版本，不自动追 GitHub latest。
+  echo "${SB_PINNED_VERSION}"
 }
 
 download_singbox() {
@@ -665,6 +660,11 @@ load_credentials() {
   IPV4_ADDR=$(curl -4 -s --max-time 8 "https://api4.ipify.org" 2>/dev/null || echo "")
   IPV6_ADDR=$(curl -6 -s --max-time 8 "https://api6.ipify.org" 2>/dev/null || echo "")
   SERVER_IP="${IPV4_ADDR:-${IPV6_ADDR}}"
+  if [[ -n "${IPV4_ADDR}" ]]; then
+    DOMAIN_STRATEGY="prefer_ipv4"
+  else
+    DOMAIN_STRATEGY="prefer_ipv6"
+  fi
 }
 
 # ==============================================================
@@ -691,6 +691,8 @@ generate_server_config() {
   "inbounds": [
     {
       "type": "vless",
+      "sniff": true,
+      "sniff_override_destination": true,
       "tag": "vless-in",
       "listen": "${LISTEN_ADDR}",
       "listen_port": ${LISTEN_PORT},
@@ -720,7 +722,8 @@ generate_server_config() {
   "outbounds": [
     {
       "type": "direct",
-      "tag": "direct"
+      "tag": "direct",
+      "domain_strategy": "${DOMAIN_STRATEGY}"
     },
     {
       "type": "block",
@@ -1379,32 +1382,37 @@ menu_update_singbox() {
 
   local current_ver
   current_ver=$("${BIN_PATH}" version 2>/dev/null | \
-    grep -oP 'sing-box version \K[\d.]+' || echo "未知")
-  log_info "当前版本：v${current_ver}"
+    grep -oP 'sing-box version \K[\d.]+' || echo "")
+  log_info "当前版本：${current_ver:+v}${current_ver:-未知}"
 
-  log_info "正在检查 GitHub 最新稳定版本..."
-  local latest_ver
-  latest_ver=$(_get_latest_stable_version)
-  log_info "最新稳定版本：v${latest_ver}"
+  local target_ver
+  target_ver=$(_get_target_stable_version)
+  log_info "脚本已验证稳定版本：v${target_ver}"
 
-  if [[ "${current_ver}" == "${latest_ver}" ]]; then
-    log_info "已是最新稳定版本（v${latest_ver}），无需更新"
+  if [[ "${current_ver}" == "${target_ver}" ]]; then
+    log_info "已是脚本已验证稳定版本（v${target_ver}），无需更新"
     return 0
   fi
 
   echo ""
-  echo -e "  当前版本：v${current_ver}"
-  echo -e "  可更新到：v${latest_ver}（已测试稳定版）"
+  echo -e "  当前版本：${current_ver:+v}${current_ver:-未知}"
+  echo -e "  目标版本：v${target_ver}（脚本已验证稳定版）"
   echo ""
-  echo -ne "确认更新到 v${latest_ver}？[y/N]："
+  echo -ne "确认更新到 v${target_ver}？[y/N]："
   read -r confirm
   [[ "${confirm}" =~ ^[Yy]$ ]] || { echo "已取消更新"; return 0; }
 
-  # 备份
   local arch="${SB_ARCH}"
   if [[ -z "${arch}" ]]; then
     arch=$(uname -m)
-    [[ "${arch}" == "x86_64" ]] && arch="amd64" || arch="arm64"
+    case "${arch}" in
+      x86_64)  arch="amd64" ;;
+      aarch64) arch="arm64" ;;
+      *)
+        log_error "不支持的 CPU 架构：${arch}"
+        return ${E_ARCH}
+        ;;
+    esac
   fi
 
   mkdir -p "${BACKUP_DIR}"
@@ -1412,31 +1420,64 @@ menu_update_singbox() {
   [[ -f "${SERVER_JSON}" ]] && cp "${SERVER_JSON}" "${BACKUP_DIR}/server.json.bak"
   log_audit "更新前备份完成"
 
-  # 下载新版
-  local filename="sing-box-${latest_ver}-linux-${arch}"
+  local filename="sing-box-${target_ver}-linux-${arch}"
   local tarball="${filename}.tar.gz"
-  local url="https://github.com/SagerNet/sing-box/releases/download/v${latest_ver}/${tarball}"
+  local base_url="https://github.com/SagerNet/sing-box/releases/download/v${target_ver}"
+  local url="${base_url}/${tarball}"
+  local checksum_url="${base_url}/${tarball}.sha256sum"
   local tmp_tar="${TMP_DIR}/${tarball}"
+  local tmp_sum="${TMP_DIR}/${tarball}.sha256sum"
 
   mkdir -p "${TMP_DIR}"
-  if ! curl -fL --max-time 180 --retry 3 --progress-bar -o "${tmp_tar}" "${url}"; then
+  if ! curl -fL --max-time 180 --retry 3 --retry-delay 5 --progress-bar -o "${tmp_tar}" "${url}"; then
     log_error "下载新版本失败，更新中止"
     return ${E_DOWNLOAD}
   fi
 
-  tar -xzf "${tmp_tar}" -C "${TMP_DIR}"
-  local new_bin="${TMP_DIR}/${filename}/sing-box"
-  chmod +x "${new_bin}"
+  if curl -fL --max-time 30 --retry 2 -s -o "${tmp_sum}" "${checksum_url}" 2>/dev/null; then
+    log_info "正在校验文件完整性（sha256）..."
+    local expected actual
+    expected=$(grep "[[:space:]]${tarball}\$" "${tmp_sum}" 2>/dev/null | awk '{print $1}')
+    actual=$(sha256sum "${tmp_tar}" | awk '{print $1}')
 
-  # 配置兼容性检查（新版二进制 check 旧配置）
-  log_info "检查新版本与当前配置的兼容性..."
-  if ! "${new_bin}" check -c "${SERVER_JSON}" 2>/dev/null; then
-    log_error "新版本（v${latest_ver}）与当前配置不兼容，更新中止，旧版本保留"
-    rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}"
-    return ${E_CONFIG}
+    if [[ -z "${expected}" ]]; then
+      log_warn "未能从校验文件中提取预期哈希，跳过校验"
+    elif [[ "${expected}" != "${actual}" ]]; then
+      log_error "文件校验失败（预期：${expected}，实际：${actual}）"
+      rm -f "${tmp_tar}" "${tmp_sum}"
+      return ${E_VERIFY}
+    else
+      log_info "sha256 校验通过"
+    fi
+  else
+    log_warn "无法下载校验文件，跳过 sha256 校验（建议手动核对哈希）"
   fi
 
-  # 替换二进制
+  if ! tar -xzf "${tmp_tar}" -C "${TMP_DIR}" 2>/dev/null; then
+    log_error "解压新版本失败，更新中止"
+    rm -f "${tmp_tar}" "${tmp_sum}"
+    return ${E_DOWNLOAD}
+  fi
+
+  local new_bin="${TMP_DIR}/${filename}/sing-box"
+  if [[ ! -f "${new_bin}" ]]; then
+    log_error "下载包中未找到 sing-box 二进制，更新中止"
+    rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" "${tmp_sum}"
+    return ${E_DOWNLOAD}
+  fi
+  chmod +x "${new_bin}"
+
+  if [[ -f "${SERVER_JSON}" ]]; then
+    log_info "检查目标版本与当前配置的兼容性..."
+    if ! "${new_bin}" check -c "${SERVER_JSON}" 2>/dev/null; then
+      log_error "目标版本（v${target_ver}）与当前配置不兼容，更新中止，旧版本保留"
+      rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" "${tmp_sum}"
+      return ${E_CONFIG}
+    fi
+  else
+    log_warn "未找到当前服务端配置，跳过配置兼容性检查"
+  fi
+
   systemctl stop sing-box 2>/dev/null || true
   install -m 755 "${new_bin}" "${BIN_PATH}"
   systemctl start sing-box 2>/dev/null
@@ -1444,16 +1485,18 @@ menu_update_singbox() {
 
   if systemctl is-active --quiet sing-box; then
     log_info "更新成功！当前版本：$("${BIN_PATH}" version 2>/dev/null | head -1)"
-    log_audit "sing-box 更新到 v${latest_ver}"
+    log_audit "sing-box 更新到 v${target_ver}"
   else
     log_error "更新后服务未正常启动，正在回滚..."
     [[ -f "${BACKUP_DIR}/sing-box.bak" ]] && install -m 755 "${BACKUP_DIR}/sing-box.bak" "${BIN_PATH}"
     [[ -f "${BACKUP_DIR}/server.json.bak" ]] && cp "${BACKUP_DIR}/server.json.bak" "${SERVER_JSON}"
     systemctl start sing-box 2>/dev/null || true
-    log_warn "已回滚到旧版本 v${current_ver}"
+    log_warn "已回滚到旧版本 ${current_ver:+v}${current_ver:-未知}"
+    rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" "${tmp_sum}" 2>/dev/null || true
+    return ${E_SERVICE}
   fi
 
-  rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" 2>/dev/null || true
+  rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" "${tmp_sum}" 2>/dev/null || true
 }
 
 menu_change_port() {
