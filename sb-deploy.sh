@@ -83,7 +83,6 @@ PUBLIC_KEY=""
 SHORT_ID=""
 IPV4_ADDR=""
 IPV6_ADDR=""
-DOMAIN_STRATEGY="prefer_ipv4"
 SB_ARCH=""
 
 # ==============================================================
@@ -332,12 +331,10 @@ detect_ip() {
         log_info "IPv6 不可用，降级为 0.0.0.0 监听"
       fi
     fi
-    DOMAIN_STRATEGY="prefer_ipv4"
   else
     # 纯 IPv6 VPS
     SERVER_IP="${IPV6_ADDR}"
     LISTEN_ADDR="::"
-    DOMAIN_STRATEGY="prefer_ipv6"
     log_info "纯 IPv6 VPS，SERVER_IP 使用 IPv6"
   fi
 
@@ -704,8 +701,6 @@ generate_server_config() {
   "inbounds": [
     {
       "type": "vless",
-      "sniff": true,
-      "sniff_override_destination": true,
       "tag": "vless-in",
       "listen": "${LISTEN_ADDR}",
       "listen_port": ${LISTEN_PORT},
@@ -725,7 +720,9 @@ generate_server_config() {
             "server_port": 443
           },
           "private_key": "${PRIVATE_KEY}",
-          "short_id": ["${SHORT_ID}"]
+          "short_id": [
+            "${SHORT_ID}"
+          ]
         }
       }
     }
@@ -733,8 +730,7 @@ generate_server_config() {
   "outbounds": [
     {
       "type": "direct",
-      "tag": "direct",
-      "domain_strategy": "${DOMAIN_STRATEGY}"
+      "tag": "direct"
     },
     {
       "type": "block",
@@ -872,7 +868,8 @@ generate_client_configs() {
         "outbound": "direct"
       }
     ],
-    "final": "vless-out"
+    "final": "vless-out",
+    "auto_detect_interface": true
   }
 }
 EOF
@@ -912,6 +909,7 @@ proxies:
     uuid: ${UUID_VAL}
     network: tcp
     tls: true
+    udp: true
     flow: xtls-rprx-vision
     servername: ${SNI}
     reality-opts:
@@ -1178,8 +1176,7 @@ create_systemd_service() {
 [Unit]
 Description=sing-box proxy service
 Documentation=https://sing-box.sagernet.org/
-After=network.target network-online.target nss-lookup.target
-Wants=network-online.target
+After=network.target nss-lookup.target
 
 [Service]
 Type=simple
