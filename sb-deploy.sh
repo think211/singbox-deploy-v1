@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================
-# Sing-box 一键安全部署脚本
+# Sing-box 一键安全部署脚本 M1
 # 需求文档：v4.2-final
 # 协议：VLESS + Reality + xtls-rprx-vision
 # 支持系统：Ubuntu 22.04 / 24.04、Debian 12（amd64 / arm64）
@@ -10,8 +10,8 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ────────── 脚本版本 ──────────
-readonly SCRIPT_VERSION="1.1.0"
-# 已测试兼容版本（锁定稳定版，不追 latest）
+readonly SCRIPT_VERSION="1.0.0"
+# 已测试兼容版本（M1 锁定，不追 latest）
 readonly SB_PINNED_VERSION="1.10.6"
 
 # ────────── 目录 & 路径常量 ──────────
@@ -19,8 +19,6 @@ readonly INSTALL_DIR="/etc/sb-deploy"
 readonly LOG_DIR="/var/log/sb-deploy"
 readonly BIN_PATH="/usr/local/bin/sing-box"
 readonly SERVICE_FILE="/etc/systemd/system/sing-box.service"
-readonly SERVICE_USER="sb-deploy"
-readonly SERVICE_GROUP="sb-deploy"
 
 readonly CONFIG_DIR="${INSTALL_DIR}/config"
 readonly CRED_DIR="${INSTALL_DIR}/credentials"
@@ -259,62 +257,36 @@ check_and_install_deps() {
 # ==============================================================
 
 optimize_bbr() {
-  log_step "优化系统网络性能 (BBR / TCP 缓冲区)"
+  log_step "优化 BBR 拥塞控制"
 
-  # 1. 检查并开启 BBR
-  if ! sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
-    echo -e "${YELLOW}检测到系统未启用 BBR。开启 BBR 可极大提升 5G/移动网络在丢包情况下的连接速度和稳定性。${NC}"
-    echo -ne "是否自动开启系统的内置 BBR 加速？(建议开启) [Y/n]："
-    read -r enable_bbr
-    enable_bbr="${enable_bbr:-y}"
+  if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
+    log_info "检测到系统已启用 BBR 拥塞控制算法"
+    return 0
+  fi
 
-    if [[ "${enable_bbr}" =~ ^[Yy]$ ]]; then
-      log_info "正在写入配置开启 BBR..."
-      if ! grep -q "net.core.default_qdisc" /etc/sysctl.conf; then
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-      fi
-      if ! grep -q "net.ipv4.tcp_congestion_control" /etc/sysctl.conf; then
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-      fi
-      sysctl -p >/dev/null 2>&1 || true
+  echo -e "${YELLOW}检测到系统未启用 BBR。开启 BBR 可极大提升 5G/移动网络在丢包情况下的连接速度 and 稳定性。${NC}"
+  echo -ne "是否自动开启系统的内置 BBR 加速？(建议开启) [Y/n]："
+  read -r enable_bbr
+  enable_bbr="${enable_bbr:-y}"
 
-      if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
-        log_info "BBR 加速开启成功！"
-      else
-        log_warn "开启 BBR 加速失败，请检查系统内核是否支持内置 BBR"
-      fi
+  if [[ "${enable_bbr}" =~ ^[Yy]$ ]]; then
+    log_info "正在写入配置开启 BBR..."
+    if ! grep -q "net.core.default_qdisc" /etc/sysctl.conf; then
+      echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "net.ipv4.tcp_congestion_control" /etc/sysctl.conf; then
+      echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    fi
+    sysctl -p >/dev/null 2>&1 || true
+
+    if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
+      log_info "BBR 加速开启成功！"
     else
-      log_info "已跳过 BBR 优化"
+      log_warn "开启 BBR 加速失败，请检查系统内核是否支持内置 BBR"
     fi
   else
-    log_info "系统已启用 BBR 拥塞控制算法"
+    log_info "已跳过 BBR 优化"
   fi
-
-  # 2. 配置大流量 socket 缓冲区。移动网络下不启用 TCP Fast Open，避免运营商 NAT 丢弃 TFO 包。
-  log_info "正在配置系统 TCP 缓冲区参数..."
-
-  if ! grep -q "net.core.rmem_max=16777216" /etc/sysctl.conf; then
-    sed -i '/^net\.core\.rmem_max/d' /etc/sysctl.conf 2>/dev/null || true
-    echo "net.core.rmem_max=16777216" >> /etc/sysctl.conf
-  fi
-
-  if ! grep -q "net.core.wmem_max=16777216" /etc/sysctl.conf; then
-    sed -i '/^net\.core\.wmem_max/d' /etc/sysctl.conf 2>/dev/null || true
-    echo "net.core.wmem_max=16777216" >> /etc/sysctl.conf
-  fi
-
-  if ! grep -q "net.ipv4.tcp_rmem" /etc/sysctl.conf; then
-    sed -i '/^net\.ipv4\.tcp_rmem/d' /etc/sysctl.conf 2>/dev/null || true
-    echo "net.ipv4.tcp_rmem=4096 87380 16777216" >> /etc/sysctl.conf
-  fi
-
-  if ! grep -q "net.ipv4.tcp_wmem" /etc/sysctl.conf; then
-    sed -i '/^net\.ipv4\.tcp_wmem/d' /etc/sysctl.conf 2>/dev/null || true
-    echo "net.ipv4.tcp_wmem=4096 65536 16777216" >> /etc/sysctl.conf
-  fi
-
-  sysctl -p >/dev/null 2>&1 || true
-  log_info "系统网络优化参数配置完成！"
 }
 
 # ==============================================================
@@ -499,10 +471,10 @@ prompt_sni() {
 
   echo -e "\n${CYAN}Reality SNI 是 sing-box 用于伪装流量的目标 HTTPS 站点域名。${NC}"
   echo -e "要求：真实可访问的 HTTPS 站点，支持 TLS 1.3，境外大厂为佳。"
-  echo -e "推荐：${BOLD}apple.com${NC}（默认）、www.microsoft.com、www.cloudflare.com"
+  echo -e "推荐：${BOLD}www.apple.com${NC}（默认）、www.microsoft.com、www.cloudflare.com"
   echo ""
 
-  local default_sni="apple.com"
+  local default_sni="www.apple.com"
 
   while true; do
     echo -ne "请输入 Reality SNI（直接回车使用默认值 ${BOLD}${default_sni}${NC}）："
@@ -773,7 +745,6 @@ generate_server_config() {
 EOF
 
   chmod 600 "${SERVER_JSON}"
-  apply_runtime_permissions
   log_info "服务端配置已写入：${SERVER_JSON}"
 
   # 配置校验（失败则回滚）
@@ -908,7 +879,7 @@ EOF
 
   # ── Clash / Mihomo YAML ──────────────────────────────────
   cat > "${CLASH_YAML}" <<EOF
-# Clash/Mihomo 配置 - 由 sb-deploy 生成
+# Clash/Mihomo 配置 - 由 sb-deploy M1 生成
 # 生成时间：$(date '+%Y-%m-%d %H:%M:%S')
 
 mixed-port: 7890
@@ -968,7 +939,7 @@ EOF
 
   # ── Surge 配置 ───────────────────────────────────────────
   cat > "${SURGE_CONF}" <<EOF
-# Surge 配置 - 由 sb-deploy 生成
+# Surge 配置 - 由 sb-deploy M1 生成
 # 生成时间：$(date '+%Y-%m-%d %H:%M:%S')
 # 注意：Surge 对 VLESS-Reality 的支持因版本而异，
 #       若导入失败请使用 Shadowrocket（小火箭）或 Mihomo。
@@ -1212,34 +1183,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=${SERVICE_USER}
-Group=${SERVICE_GROUP}
 ExecStartPre=${BIN_PATH} check -c ${SERVER_JSON}
 ExecStart=${BIN_PATH} run -c ${SERVER_JSON}
 Restart=on-failure
 RestartSec=10s
 LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-PrivateTmp=true
-PrivateDevices=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-ReadOnlyPaths=${INSTALL_DIR}
-ReadWritePaths=${LOG_DIR}
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-LockPersonality=true
-SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-  apply_runtime_permissions
   systemctl daemon-reload
   systemctl enable sing-box >/dev/null 2>&1
   log_info "systemd 服务已创建：${SERVICE_FILE}"
@@ -1271,7 +1224,6 @@ _rollback_on_service_fail() {
   if [[ -f "${BACKUP_DIR}/server.json.bak" ]]; then
     log_warn "正在回滚到备份配置..."
     cp "${BACKUP_DIR}/server.json.bak" "${SERVER_JSON}"
-    apply_runtime_permissions
     systemctl restart sing-box 2>/dev/null || true
     if systemctl is-active --quiet sing-box; then
       log_warn "已回滚，旧配置服务恢复运行"
@@ -1319,7 +1271,7 @@ print_install_summary() {
 
   echo ""
   echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${GREEN}${BOLD}║           sing-box 安装完成！                                ║${NC}"
+  echo -e "${GREEN}${BOLD}║           sing-box M1 安装完成！                             ║${NC}"
   echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo ""
 
@@ -1356,9 +1308,10 @@ print_install_summary() {
   echo ""
 
   echo -e "${YELLOW}┌──────────────────────────────────────────────────────────────┐${NC}"
-  echo -e "${YELLOW}│  【安全运行说明】                                             │${NC}"
+  echo -e "${YELLOW}│  【M1 运行权限说明（已知风险）】                              │${NC}"
   echo -e "${YELLOW}└──────────────────────────────────────────────────────────────┘${NC}"
-  echo -e "sing-box 服务使用专用系统用户 ${SERVICE_USER} 运行，并仅授予绑定低位端口所需能力。"
+  echo -e "M1 阶段 sing-box 以 root 用户运行。该设计用于降低首版实现复杂度，"
+  echo -e "后续 M2 将改为专用系统用户运行，并通过 CAP_NET_BIND_SERVICE 绑定低位端口。"
   echo ""
 
   echo -e "再次运行本脚本即可进入管理菜单。"
@@ -1374,45 +1327,6 @@ is_installed() {
   [[ -f "${SERVER_JSON}" ]] &&
   [[ -f "${VLESS_CRED}" ]] &&
   [[ -f "${REALITY_CRED}" ]]
-}
-
-repair_existing_install() {
-  log_step "修复现有安装配置"
-
-  load_credentials
-  ensure_service_user
-
-  if command -v jq &>/dev/null; then
-    mkdir -p "${BACKUP_DIR}"
-    cp "${SERVER_JSON}" "${BACKUP_DIR}/server.json.pre-repair.bak"
-
-    jq '.inbounds[0].sniff = true |
-        .inbounds[0].sniff_override_destination = true |
-        del(.inbounds[0].tcp_fast_open, .inbounds[0].udp_fragment, .inbounds[0].packet_encoding) |
-        (.outbounds[] | select(.type == "direct") | .domain_strategy) //= "prefer_ipv4"' \
-      "${SERVER_JSON}" > "${SERVER_JSON}.tmp" && mv "${SERVER_JSON}.tmp" "${SERVER_JSON}"
-  else
-    log_warn "jq 不可用，跳过 server.json 自动清理；建议安装 jq 后重新运行脚本"
-  fi
-
-  apply_runtime_permissions
-
-  if ! "${BIN_PATH}" check -c "${SERVER_JSON}" 2>/dev/null; then
-    log_error "修复后的配置检查失败，已回滚 server.json"
-    [[ -f "${BACKUP_DIR}/server.json.pre-repair.bak" ]] && \
-      cp "${BACKUP_DIR}/server.json.pre-repair.bak" "${SERVER_JSON}"
-    apply_runtime_permissions
-    return ${E_CONFIG}
-  fi
-
-  create_systemd_service
-  generate_client_configs
-
-  if systemctl is-active --quiet sing-box 2>/dev/null; then
-    systemctl restart sing-box 2>/dev/null || log_warn "服务重启失败，请在菜单中查看日志"
-  fi
-
-  log_info "现有安装配置已修复"
 }
 
 save_install_state() {
@@ -1437,56 +1351,11 @@ EOF
 # §13  目录初始化
 # ==============================================================
 
-ensure_service_user() {
-  log_step "创建专用运行用户"
-
-  if ! getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
-    groupadd --system "${SERVICE_GROUP}" 2>/dev/null || {
-      log_error "创建系统组 ${SERVICE_GROUP} 失败"
-      exit ${E_SERVICE}
-    }
-  fi
-
-  if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
-    local nologin="/usr/sbin/nologin"
-    [[ -x "${nologin}" ]] || nologin="/bin/false"
-    useradd --system \
-      --gid "${SERVICE_GROUP}" \
-      --home-dir /nonexistent \
-      --no-create-home \
-      --shell "${nologin}" \
-      "${SERVICE_USER}" 2>/dev/null || {
-        log_error "创建系统用户 ${SERVICE_USER} 失败"
-        exit ${E_SERVICE}
-      }
-  fi
-
-  log_info "运行用户：${SERVICE_USER}:${SERVICE_GROUP}"
-}
-
-apply_runtime_permissions() {
-  getent group "${SERVICE_GROUP}" >/dev/null 2>&1 || return 0
-
-  chgrp "${SERVICE_GROUP}" "${INSTALL_DIR}" "${CONFIG_DIR}" "${LOG_DIR}" 2>/dev/null || true
-  chmod 750 "${INSTALL_DIR}" "${CONFIG_DIR}" "${LOG_DIR}" 2>/dev/null || true
-
-  if [[ -f "${SERVER_JSON}" ]]; then
-    chgrp "${SERVICE_GROUP}" "${SERVER_JSON}" 2>/dev/null || true
-    chmod 640 "${SERVER_JSON}" 2>/dev/null || true
-  fi
-
-  touch "${LOG_DIR}/singbox.log" 2>/dev/null || true
-  chown "${SERVICE_USER}:${SERVICE_GROUP}" "${LOG_DIR}/singbox.log" 2>/dev/null || true
-  chmod 640 "${LOG_DIR}/singbox.log" 2>/dev/null || true
-}
-
 init_dirs() {
-  ensure_service_user
   mkdir -p "${CONFIG_DIR}" "${CRED_DIR}" "${STATE_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
   chmod 700 "${INSTALL_DIR}" "${CONFIG_DIR}" "${CRED_DIR}" "${STATE_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
   mkdir -p "${LOG_DIR}"
   chmod 700 "${LOG_DIR}"
-  apply_runtime_permissions
 }
 
 # ==============================================================
@@ -1672,7 +1541,6 @@ menu_update_singbox() {
     log_error "更新后服务未正常启动，正在回滚..."
     [[ -f "${BACKUP_DIR}/sing-box.bak" ]] && install -m 755 "${BACKUP_DIR}/sing-box.bak" "${BIN_PATH}"
     [[ -f "${BACKUP_DIR}/server.json.bak" ]] && cp "${BACKUP_DIR}/server.json.bak" "${SERVER_JSON}"
-    apply_runtime_permissions
     systemctl start sing-box 2>/dev/null || true
     log_warn "已回滚到旧版本 v${current_ver}"
   fi
@@ -1710,17 +1578,11 @@ menu_change_port() {
   # 修改 server.json（listen_port）
   local old_port="${LISTEN_PORT}"
   if command -v jq &>/dev/null; then
-    jq --argjson p "${new_port}" \
-       '.inbounds[0].listen_port = $p |
-        .inbounds[0].sniff = true |
-        .inbounds[0].sniff_override_destination = true |
-        del(.inbounds[0].tcp_fast_open, .inbounds[0].udp_fragment, .inbounds[0].packet_encoding)' \
+    jq --argjson p "${new_port}" '.inbounds[0].listen_port = $p' \
       "${SERVER_JSON}" > "${SERVER_JSON}.tmp" && mv "${SERVER_JSON}.tmp" "${SERVER_JSON}"
   else
     sed -i "s/\"listen_port\":[[:space:]]*${old_port}/\"listen_port\": ${new_port}/" "${SERVER_JSON}"
   fi
-
-  apply_runtime_permissions
 
   if ! "${BIN_PATH}" check -c "${SERVER_JSON}" 2>/dev/null; then
     log_error "配置检查失败，回滚端口修改"
@@ -1794,15 +1656,13 @@ menu_change_sni() {
     jq --arg sni "${SNI}" \
        '.inbounds[0].tls.server_name = $sni |
         .inbounds[0].tls.reality.handshake.server = $sni' \
-      "${SERVER_JSON}" > "${SERVER_JSON}.tmp" && mv "${SERVER_JSON}.tmp" "${SERVER_JSON}"
+       "${SERVER_JSON}" > "${SERVER_JSON}.tmp" && mv "${SERVER_JSON}.tmp" "${SERVER_JSON}"
   else
     log_error "修改 SNI 需要 jq，请先安装：apt install -y jq"
     cp "${BACKUP_DIR}/server.json.bak" "${SERVER_JSON}"
     SNI="${old_sni}"
     return 1
   fi
-
-  apply_runtime_permissions
 
   if ! "${BIN_PATH}" check -c "${SERVER_JSON}" 2>/dev/null; then
     log_error "配置检查失败，回滚 SNI 修改"
@@ -1831,92 +1691,6 @@ menu_change_sni() {
     cp "${BACKUP_DIR}/server.json.bak" "${SERVER_JSON}"
     cp "${BACKUP_DIR}/reality.json.bak" "${REALITY_CRED}"
     SNI="${old_sni}"
-    systemctl restart sing-box 2>/dev/null || true
-    return ${E_SERVICE}
-  fi
-
-  menu_view_link
-}
-
-menu_5g_stability_mode() {
-  load_credentials
-  log_step "5G 稳定模式修复"
-
-  local old_port="${LISTEN_PORT}"
-  local old_sni="${SNI}"
-  local new_sni="apple.com"
-  local new_port="${old_port}"
-
-  echo -e "当前端口：${old_port}"
-  echo -e "当前 SNI ：${old_sni}"
-  echo ""
-  echo -e "将切换为 5G 稳定组合："
-  echo -e "  端口：TCP ${new_port}（保持不变）"
-  echo -e "  SNI ：${new_sni}（参考稳定脚本默认值）"
-  echo ""
-  echo -e "${YELLOW}切换后旧链接会失效，需要重新扫码/复制新链接。${NC}"
-  echo -ne "确认执行 5G 稳定模式修复？[Y/n]："
-  read -r confirm
-  confirm="${confirm:-y}"
-  [[ "${confirm}" =~ ^[Yy]$ ]] || { echo "已取消"; return 0; }
-
-  if ! _validate_sni "${new_sni}"; then
-    log_error "默认 SNI ${new_sni} 检测失败，已取消修复"
-    return 1
-  fi
-
-  mkdir -p "${BACKUP_DIR}"
-  cp "${SERVER_JSON}" "${BACKUP_DIR}/server.json.5g.bak"
-  cp "${REALITY_CRED}" "${BACKUP_DIR}/reality.json.5g.bak"
-
-  if ! command -v jq &>/dev/null; then
-    log_error "5G 稳定模式需要 jq，请先安装：apt install -y jq"
-    return 1
-  fi
-
-  SNI="${new_sni}"
-  LISTEN_PORT="${new_port}"
-
-  jq --arg sni "${SNI}" --argjson port "${LISTEN_PORT}" \
-     '.inbounds[0].listen_port = $port |
-      .inbounds[0].sniff = true |
-      .inbounds[0].sniff_override_destination = true |
-      .inbounds[0].tls.server_name = $sni |
-      .inbounds[0].tls.reality.handshake.server = $sni |
-      del(.inbounds[0].tcp_fast_open, .inbounds[0].udp_fragment, .inbounds[0].packet_encoding) |
-      (.outbounds[] | select(.type == "direct") | .domain_strategy) //= "prefer_ipv4"' \
-    "${SERVER_JSON}" > "${SERVER_JSON}.tmp" && mv "${SERVER_JSON}.tmp" "${SERVER_JSON}"
-
-  jq --arg sni "${SNI}" '.sni = $sni' "${REALITY_CRED}" > "${REALITY_CRED}.tmp" && \
-    mv "${REALITY_CRED}.tmp" "${REALITY_CRED}"
-
-  apply_runtime_permissions
-
-  if ! "${BIN_PATH}" check -c "${SERVER_JSON}" 2>/dev/null; then
-    log_error "5G 稳定模式配置检查失败，正在回滚"
-    cp "${BACKUP_DIR}/server.json.5g.bak" "${SERVER_JSON}"
-    cp "${BACKUP_DIR}/reality.json.5g.bak" "${REALITY_CRED}"
-    SNI="${old_sni}"
-    LISTEN_PORT="${old_port}"
-    apply_runtime_permissions
-    return ${E_CONFIG}
-  fi
-
-  generate_client_configs
-
-  systemctl restart sing-box 2>/dev/null
-  sleep 2
-
-  if systemctl is-active --quiet sing-box; then
-    log_info "5G 稳定模式已启用：TCP ${LISTEN_PORT} / SNI ${SNI}"
-    log_audit "启用 5G 稳定模式：端口 ${old_port}->${LISTEN_PORT}, SNI ${old_sni}->${SNI}"
-  else
-    log_error "服务重启失败，正在回滚"
-    cp "${BACKUP_DIR}/server.json.5g.bak" "${SERVER_JSON}"
-    cp "${BACKUP_DIR}/reality.json.5g.bak" "${REALITY_CRED}"
-    SNI="${old_sni}"
-    LISTEN_PORT="${old_port}"
-    apply_runtime_permissions
     systemctl restart sing-box 2>/dev/null || true
     return ${E_SERVICE}
   fi
@@ -2029,8 +1803,6 @@ menu_restore_backup() {
   [[ -f "${latest_snapshot}/vless.json" ]]   && cp "${latest_snapshot}/vless.json"   "${VLESS_CRED}"   2>/dev/null || true
   [[ -f "${latest_snapshot}/reality.json" ]] && cp "${latest_snapshot}/reality.json" "${REALITY_CRED}" 2>/dev/null || true
 
-  apply_runtime_permissions
-
   if ! "${BIN_PATH}" check -c "${SERVER_JSON}" 2>/dev/null; then
     log_error "备份配置校验失败，请手动检查 ${SERVER_JSON}"
     return ${E_CONFIG}
@@ -2072,17 +1844,12 @@ do_uninstall() {
   # 回收防火墙规则（仅删除 state 文件中记录的规则）
   [[ -f "${FW_STATE}" ]] && remove_firewall_rules || true
 
-  # 清理系统级网络优化 sysctl 配置（仅删除本脚本写入的行）
-  if [ -f /etc/sysctl.conf ]; then
+  # 清理 BBR sysctl 配置（仅删除本脚本写入的行）
+  if grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null || \
+     grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
     sed -i '/^net\.core\.default_qdisc=fq$/d' /etc/sysctl.conf 2>/dev/null || true
     sed -i '/^net\.ipv4\.tcp_congestion_control=bbr$/d' /etc/sysctl.conf 2>/dev/null || true
-    sed -i '/^net\.ipv4\.tcp_fastopen=3$/d' /etc/sysctl.conf 2>/dev/null || true
-    sed -i '/^net\.core\.rmem_max=16777216$/d' /etc/sysctl.conf 2>/dev/null || true
-    sed -i '/^net\.core\.wmem_max=16777216$/d' /etc/sysctl.conf 2>/dev/null || true
-    sed -i '/^net\.ipv4\.tcp_rmem=4096 87380 16777216$/d' /etc/sysctl.conf 2>/dev/null || true
-    sed -i '/^net\.ipv4\.tcp_wmem=4096 65536 16777216$/d' /etc/sysctl.conf 2>/dev/null || true
-    sysctl -p >/dev/null 2>&1 || true
-    log_info "已清理系统级网络优化配置"
+    log_info "已清理 BBR sysctl 配置"
   fi
 
   # 删除文件
@@ -2095,13 +1862,6 @@ do_uninstall() {
 
   rm -rf "${INSTALL_DIR}" 2>/dev/null || log_warn "删除 ${INSTALL_DIR} 失败"
   rm -rf "${LOG_DIR}" 2>/dev/null || log_warn "删除 ${LOG_DIR} 失败"
-
-  if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
-    userdel "${SERVICE_USER}" 2>/dev/null || log_warn "删除系统用户 ${SERVICE_USER} 失败"
-  fi
-  if getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
-    groupdel "${SERVICE_GROUP}" 2>/dev/null || true
-  fi
 
   echo ""
   echo -e "${GREEN}${BOLD}sing-box 已卸载。${NC}"
@@ -2130,7 +1890,7 @@ _menu_header() {
 
   echo ""
   echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${BOLD}${CYAN}║           sing-box 管理菜单  v${SCRIPT_VERSION}                      ║${NC}"
+  echo -e "${BOLD}${CYAN}║           sing-box 管理菜单  M1 v${SCRIPT_VERSION}                   ║${NC}"
   echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo -e "  服务：${svc_status}   端口：${LISTEN_PORT}   版本：v${ver}"
   echo ""
@@ -2150,11 +1910,10 @@ _menu_header() {
   echo -e "  ${BOLD}14.${NC} 重新生成全部凭据"
   echo -e "  ${BOLD}15.${NC} 备份当前配置"
   echo -e "  ${BOLD}16.${NC} 恢复上一个备份"
-  echo -e "  ${BOLD}17.${NC} 5G 稳定模式修复（保持端口 + apple.com SNI）"
-  echo -e "  ${BOLD}18.${NC} 完全卸载"
+  echo -e "  ${BOLD}17.${NC} 完全卸载"
   echo -e "   ${BOLD}0.${NC} 退出"
   echo ""
-  echo -ne "请选择 [0-18]："
+  echo -ne "请选择 [0-17]："
 }
 
 run_menu() {
@@ -2180,10 +1939,9 @@ run_menu() {
       14) menu_regen_credentials ;;
       15) menu_backup ;;
       16) menu_restore_backup ;;
-      17) menu_5g_stability_mode ;;
-      18) do_uninstall; break ;;
+      17) do_uninstall; break ;;
       0)  echo -e "${NC}已退出"; break ;;
-      *)  echo -e "${YELLOW}无效选项，请输入 0-18${NC}" ;;
+      *)  echo -e "${YELLOW}无效选项，请输入 0-17${NC}" ;;
     esac
 
     echo ""
@@ -2209,7 +1967,6 @@ main() {
   # 已安装则直接进管理菜单
   if is_installed; then
     echo -e "${CYAN}检测到 sing-box 已安装，进入管理菜单...${NC}"
-    repair_existing_install || log_warn "现有安装自动修复未完成，请查看上方错误后再操作菜单"
     run_menu
     exit ${E_OK}
   fi
@@ -2217,13 +1974,13 @@ main() {
   # ──────── 首次安装流程 ────────
   echo ""
   echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${BOLD}${CYAN}║    sing-box 一键安全部署脚本  v${SCRIPT_VERSION}                  ║${NC}"
+  echo -e "${BOLD}${CYAN}║    sing-box 一键安全部署脚本  M1 v${SCRIPT_VERSION}               ║${NC}"
   echo -e "${BOLD}${CYAN}║    协议：VLESS + Reality + xtls-rprx-vision                  ║${NC}"
   echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo ""
 
   log_audit "安装开始"
-  log_info "开始安装 sing-box..."
+  log_info "开始安装 sing-box M1..."
 
   # 步骤 1-5：系统检测
   check_os          # §4.1
