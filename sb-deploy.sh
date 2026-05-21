@@ -1063,6 +1063,8 @@ _remove_single_fw_rule() {
           iptables -D INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null && \
             log_info "iptables 规则已移除：${port}/${proto}" || \
             log_warn "iptables 规则移除失败：${port}/${proto}"
+          netfilter-persistent save >/dev/null 2>&1 || \
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         fi
       fi
       ;;
@@ -1777,6 +1779,14 @@ do_uninstall() {
 
   # 回收防火墙规则（仅删除 state 文件中记录的规则）
   [[ -f "${FW_STATE}" ]] && remove_firewall_rules || true
+
+  # 清理 BBR sysctl 配置（仅删除本脚本写入的行）
+  if grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null || \
+     grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
+    sed -i '/^net\.core\.default_qdisc=fq$/d' /etc/sysctl.conf 2>/dev/null || true
+    sed -i '/^net\.ipv4\.tcp_congestion_control=bbr$/d' /etc/sysctl.conf 2>/dev/null || true
+    log_info "已清理 BBR sysctl 配置"
+  fi
 
   # 删除文件
   rm -f "${BIN_PATH}" 2>/dev/null || log_warn "删除 ${BIN_PATH} 失败"
