@@ -721,10 +721,13 @@ generate_server_config() {
           },
           "private_key": "${PRIVATE_KEY}",
           "short_id": [
-            "${SHORT_ID}"
-          ]
+            "${SHORT_ID}",
+            ""
+          ],
+          "max_time_difference": "1m"
         }
-      }
+      },
+      "tcp_fast_open": true
     }
   ],
   "outbounds": [
@@ -769,7 +772,7 @@ _build_vless_link() {
     addr="[${addr}]"
   fi
   local tag="SB-${addr}:${LISTEN_PORT}"
-  echo "vless://${UUID_VAL}@${addr}:${LISTEN_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${tag}"
+  echo "vless://${UUID_VAL}@${addr}:${LISTEN_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=random&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${tag}"
 }
 
 generate_client_configs() {
@@ -835,7 +838,7 @@ generate_client_configs() {
         "server_name": "${SNI}",
         "utls": {
           "enabled": true,
-          "fingerprint": "chrome"
+          "fingerprint": "random"
         },
         "reality": {
           "enabled": true,
@@ -868,8 +871,7 @@ generate_client_configs() {
         "outbound": "direct"
       }
     ],
-    "final": "vless-out",
-    "auto_detect_interface": true
+    "final": "vless-out"
   }
 }
 EOF
@@ -909,13 +911,12 @@ proxies:
     uuid: ${UUID_VAL}
     network: tcp
     tls: true
-    udp: true
     flow: xtls-rprx-vision
     servername: ${SNI}
     reality-opts:
       public-key: ${PUBLIC_KEY}
       short-id: ${SHORT_ID}
-    client-fingerprint: chrome
+    client-fingerprint: random
 
 proxy-groups:
   - name: Proxy
@@ -1176,7 +1177,8 @@ create_systemd_service() {
 [Unit]
 Description=sing-box proxy service
 Documentation=https://sing-box.sagernet.org/
-After=network.target nss-lookup.target
+After=network.target network-online.target nss-lookup.target
+Wants=network-online.target
 
 [Service]
 Type=simple
