@@ -93,22 +93,32 @@ _ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
 log_info()  {
   echo -e "${GREEN}[✓]${NC} $*"
-  echo "[$(_ts)] INFO  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] INFO  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  fi
 }
 log_warn()  {
   echo -e "${YELLOW}[!]${NC} $*"
-  echo "[$(_ts)] WARN  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] WARN  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  fi
 }
 log_error() {
   echo -e "${RED}[✗]${NC} $*" >&2
-  echo "[$(_ts)] ERROR $*" >> "${ERROR_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] ERROR $*" >> "${ERROR_LOG}" 2>/dev/null || true
+  fi
 }
 log_step()  {
   echo -e "\n${BOLD}${BLUE}━━ $* ━━${NC}"
-  echo "[$(_ts)] STEP  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] STEP  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  fi
 }
 log_audit() {
-  echo "[$(_ts)] AUDIT $*" >> "${AUDIT_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] AUDIT $*" >> "${AUDIT_LOG}" 2>/dev/null || true
+  fi
 }
 
 # 脱敏：UUID 前4后4可见
