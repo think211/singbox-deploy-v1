@@ -983,46 +983,20 @@ configure_firewall() {
     fi
   fi
 
-  # ── iptables（总是执行，确保 ACCEPT 插入到 REJECT/DROP 之前）──────────────
-  # Oracle Cloud 等厂商默认存在 REJECT/DROP 兜底规则，-A 追加到末尾会被提前拦截
-  if command -v iptables &>/dev/null; then
-    local reject_pos rule_line need_add=false
-    reject_pos=$(iptables -L INPUT --line-numbers -n 2>/dev/null | \
-      awk '/REJECT|DROP/{print $1; exit}')
-    rule_line=$(iptables -L INPUT --line-numbers -n 2>/dev/null | \
-      awk -v p="${port}" '$0 ~ "dpt:"p && /ACCEPT/{print $1; exit}')
-
-    if [[ -z "${rule_line}" ]]; then
-      need_add=true
-    elif [[ -n "${reject_pos}" && "${rule_line}" -gt "${reject_pos}" ]]; then
-      log_warn "iptables：${port}/tcp 规则位于 REJECT 之后（无效），重新插入..."
-      iptables -D INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || true
-      need_add=true
-    fi
-
-    if [[ "${need_add}" == true ]]; then
+  # ── iptables（仅在未检测到上述防火墙时尝试）──────────────
+  if [[ "${any_added}" == false ]] && command -v iptables &>/dev/null; then
+    if ! iptables -C INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null; then
       log_info "检测到 iptables，添加 ${port}/tcp ACCEPT 规则..."
-      local insert_ok=false
-      if [[ -n "${reject_pos}" ]]; then
-        iptables -I INPUT "${reject_pos}" -p tcp --dport "${port}" -j ACCEPT \
-          2>/dev/null && insert_ok=true
-      else
-        iptables -A INPUT -p tcp --dport "${port}" -j ACCEPT \
-          2>/dev/null && insert_ok=true
-      fi
-
-      if [[ "${insert_ok}" == true ]]; then
+      if iptables -A INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null; then
         _record_fw_rule "iptables" "${port}" "tcp" \
-          "iptables -I INPUT -p tcp --dport ${port} -j ACCEPT"
-        log_info "iptables：${port}/tcp 已放行（插入位置：${reject_pos:-末尾}）"
-        netfilter-persistent save >/dev/null 2>&1 || \
-          iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+          "iptables -A INPUT -p tcp --dport ${port} -j ACCEPT"
+        log_info "iptables：${port}/tcp 已放行"
         any_added=true
       else
         log_warn "iptables 规则添加失败，请手动放行端口 ${port}/tcp"
       fi
     else
-      log_info "iptables：${port}/tcp 规则已存在且有效"
+      log_info "iptables：${port}/tcp 规则已存在，无需添加"
       any_added=true
     fi
   fi
@@ -1063,8 +1037,6 @@ _remove_single_fw_rule() {
           iptables -D INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null && \
             log_info "iptables 规则已移除：${port}/${proto}" || \
             log_warn "iptables 规则移除失败：${port}/${proto}"
-          netfilter-persistent save >/dev/null 2>&1 || \
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         fi
       fi
       ;;
@@ -1720,24 +1692,20 @@ menu_backup() {
 menu_restore_backup() {
   log_step "恢复上一个备份"
 
-  local latest_snapshot
-  latest_snapshot=$(ls -dt "${BACKUP_DIR}"/snapshot_* 2>/dev/null | head -1)
-
-  if [[ -z "${latest_snapshot}" ]]; then
-    log_error "未找到备份快照（${BACKUP_DIR}/snapshot_* 不存在，请先使用菜单 15 创建备份）"
+  if [[ ! -f "${BACKUP_DIR}/server.json.bak" ]]; then
+    log_error "未找到备份（${BACKUP_DIR}/server.json.bak 不存在）"
     return 1
   fi
 
-  echo -e "将恢复的备份：$(basename "${latest_snapshot}")"
-  echo -ne "确认恢复？当前配置将被覆盖。[y/N]："
+  echo -ne "确认恢复到上一个备份？当前配置将被覆盖。[y/N]："
   read -r confirm
   [[ "${confirm}" =~ ^[Yy]$ ]] || { echo "已取消"; return 0; }
 
   systemctl stop sing-box 2>/dev/null || true
 
-  [[ -f "${latest_snapshot}/server.json" ]]  && cp "${latest_snapshot}/server.json"  "${SERVER_JSON}"  2>/dev/null || true
-  [[ -f "${latest_snapshot}/vless.json" ]]   && cp "${latest_snapshot}/vless.json"   "${VLESS_CRED}"   2>/dev/null || true
-  [[ -f "${latest_snapshot}/reality.json" ]] && cp "${latest_snapshot}/reality.json" "${REALITY_CRED}" 2>/dev/null || true
+  cp "${BACKUP_DIR}/server.json.bak"  "${SERVER_JSON}"  2>/dev/null || true
+  cp "${BACKUP_DIR}/vless.json.bak"   "${VLESS_CRED}"   2>/dev/null || true
+  cp "${BACKUP_DIR}/reality.json.bak" "${REALITY_CRED}" 2>/dev/null || true
 
   if ! "${BIN_PATH}" check -c "${SERVER_JSON}" 2>/dev/null; then
     log_error "备份配置校验失败，请手动检查 ${SERVER_JSON}"
@@ -1748,8 +1716,8 @@ menu_restore_backup() {
   sleep 2
 
   if systemctl is-active --quiet sing-box; then
-    log_info "备份已恢复（$(basename "${latest_snapshot}")），服务已重启"
-    log_audit "从备份快照恢复配置：${latest_snapshot}"
+    log_info "备份已恢复，服务已重启"
+    log_audit "从备份恢复配置"
   else
     log_error "恢复后服务未能启动，请检查日志"
     return ${E_SERVICE}
@@ -1779,14 +1747,6 @@ do_uninstall() {
 
   # 回收防火墙规则（仅删除 state 文件中记录的规则）
   [[ -f "${FW_STATE}" ]] && remove_firewall_rules || true
-
-  # 清理 BBR sysctl 配置（仅删除本脚本写入的行）
-  if grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null || \
-     grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
-    sed -i '/^net\.core\.default_qdisc=fq$/d' /etc/sysctl.conf 2>/dev/null || true
-    sed -i '/^net\.ipv4\.tcp_congestion_control=bbr$/d' /etc/sysctl.conf 2>/dev/null || true
-    log_info "已清理 BBR sysctl 配置"
-  fi
 
   # 删除文件
   rm -f "${BIN_PATH}" 2>/dev/null || log_warn "删除 ${BIN_PATH} 失败"
