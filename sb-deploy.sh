@@ -499,10 +499,10 @@ prompt_sni() {
 
   echo -e "\n${CYAN}Reality SNI 是 sing-box 用于伪装流量的目标 HTTPS 站点域名。${NC}"
   echo -e "要求：真实可访问的 HTTPS 站点，支持 TLS 1.3，境外大厂为佳。"
-  echo -e "推荐：${BOLD}www.apple.com${NC}（默认）、www.microsoft.com、www.cloudflare.com"
+  echo -e "推荐：${BOLD}apple.com${NC}（默认）、www.microsoft.com、www.cloudflare.com"
   echo ""
 
-  local default_sni="www.apple.com"
+  local default_sni="apple.com"
 
   while true; do
     echo -ne "请输入 Reality SNI（直接回车使用默认值 ${BOLD}${default_sni}${NC}）："
@@ -1838,6 +1838,92 @@ menu_change_sni() {
   menu_view_link
 }
 
+menu_5g_stability_mode() {
+  load_credentials
+  log_step "5G 稳定模式修复"
+
+  local old_port="${LISTEN_PORT}"
+  local old_sni="${SNI}"
+  local new_sni="apple.com"
+  local new_port="${old_port}"
+
+  echo -e "当前端口：${old_port}"
+  echo -e "当前 SNI ：${old_sni}"
+  echo ""
+  echo -e "将切换为 5G 稳定组合："
+  echo -e "  端口：TCP ${new_port}（保持不变）"
+  echo -e "  SNI ：${new_sni}（参考稳定脚本默认值）"
+  echo ""
+  echo -e "${YELLOW}切换后旧链接会失效，需要重新扫码/复制新链接。${NC}"
+  echo -ne "确认执行 5G 稳定模式修复？[Y/n]："
+  read -r confirm
+  confirm="${confirm:-y}"
+  [[ "${confirm}" =~ ^[Yy]$ ]] || { echo "已取消"; return 0; }
+
+  if ! _validate_sni "${new_sni}"; then
+    log_error "默认 SNI ${new_sni} 检测失败，已取消修复"
+    return 1
+  fi
+
+  mkdir -p "${BACKUP_DIR}"
+  cp "${SERVER_JSON}" "${BACKUP_DIR}/server.json.5g.bak"
+  cp "${REALITY_CRED}" "${BACKUP_DIR}/reality.json.5g.bak"
+
+  if ! command -v jq &>/dev/null; then
+    log_error "5G 稳定模式需要 jq，请先安装：apt install -y jq"
+    return 1
+  fi
+
+  SNI="${new_sni}"
+  LISTEN_PORT="${new_port}"
+
+  jq --arg sni "${SNI}" --argjson port "${LISTEN_PORT}" \
+     '.inbounds[0].listen_port = $port |
+      .inbounds[0].sniff = true |
+      .inbounds[0].sniff_override_destination = true |
+      .inbounds[0].tls.server_name = $sni |
+      .inbounds[0].tls.reality.handshake.server = $sni |
+      del(.inbounds[0].tcp_fast_open, .inbounds[0].udp_fragment, .inbounds[0].packet_encoding) |
+      (.outbounds[] | select(.type == "direct") | .domain_strategy) //= "prefer_ipv4"' \
+    "${SERVER_JSON}" > "${SERVER_JSON}.tmp" && mv "${SERVER_JSON}.tmp" "${SERVER_JSON}"
+
+  jq --arg sni "${SNI}" '.sni = $sni' "${REALITY_CRED}" > "${REALITY_CRED}.tmp" && \
+    mv "${REALITY_CRED}.tmp" "${REALITY_CRED}"
+
+  apply_runtime_permissions
+
+  if ! "${BIN_PATH}" check -c "${SERVER_JSON}" 2>/dev/null; then
+    log_error "5G 稳定模式配置检查失败，正在回滚"
+    cp "${BACKUP_DIR}/server.json.5g.bak" "${SERVER_JSON}"
+    cp "${BACKUP_DIR}/reality.json.5g.bak" "${REALITY_CRED}"
+    SNI="${old_sni}"
+    LISTEN_PORT="${old_port}"
+    apply_runtime_permissions
+    return ${E_CONFIG}
+  fi
+
+  generate_client_configs
+
+  systemctl restart sing-box 2>/dev/null
+  sleep 2
+
+  if systemctl is-active --quiet sing-box; then
+    log_info "5G 稳定模式已启用：TCP ${LISTEN_PORT} / SNI ${SNI}"
+    log_audit "启用 5G 稳定模式：端口 ${old_port}->${LISTEN_PORT}, SNI ${old_sni}->${SNI}"
+  else
+    log_error "服务重启失败，正在回滚"
+    cp "${BACKUP_DIR}/server.json.5g.bak" "${SERVER_JSON}"
+    cp "${BACKUP_DIR}/reality.json.5g.bak" "${REALITY_CRED}"
+    SNI="${old_sni}"
+    LISTEN_PORT="${old_port}"
+    apply_runtime_permissions
+    systemctl restart sing-box 2>/dev/null || true
+    return ${E_SERVICE}
+  fi
+
+  menu_view_link
+}
+
 menu_regen_client_configs() {
   load_credentials
   log_step "重新生成客户端配置"
@@ -2064,10 +2150,11 @@ _menu_header() {
   echo -e "  ${BOLD}14.${NC} 重新生成全部凭据"
   echo -e "  ${BOLD}15.${NC} 备份当前配置"
   echo -e "  ${BOLD}16.${NC} 恢复上一个备份"
-  echo -e "  ${BOLD}17.${NC} 完全卸载"
+  echo -e "  ${BOLD}17.${NC} 5G 稳定模式修复（保持端口 + apple.com SNI）"
+  echo -e "  ${BOLD}18.${NC} 完全卸载"
   echo -e "   ${BOLD}0.${NC} 退出"
   echo ""
-  echo -ne "请选择 [0-17]："
+  echo -ne "请选择 [0-18]："
 }
 
 run_menu() {
@@ -2093,9 +2180,10 @@ run_menu() {
       14) menu_regen_credentials ;;
       15) menu_backup ;;
       16) menu_restore_backup ;;
-      17) do_uninstall; break ;;
+      17) menu_5g_stability_mode ;;
+      18) do_uninstall; break ;;
       0)  echo -e "${NC}已退出"; break ;;
-      *)  echo -e "${YELLOW}无效选项，请输入 0-17${NC}" ;;
+      *)  echo -e "${YELLOW}无效选项，请输入 0-18${NC}" ;;
     esac
 
     echo ""
