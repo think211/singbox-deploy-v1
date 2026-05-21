@@ -983,20 +983,46 @@ configure_firewall() {
     fi
   fi
 
-  # ── iptables（仅在未检测到上述防火墙时尝试）──────────────
-  if [[ "${any_added}" == false ]] && command -v iptables &>/dev/null; then
-    if ! iptables -C INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null; then
+  # ── iptables（总是执行，确保 ACCEPT 插入到 REJECT/DROP 之前）──────────────
+  # Oracle Cloud 等厂商默认存在 REJECT/DROP 兜底规则，-A 追加到末尾会被提前拦截
+  if command -v iptables &>/dev/null; then
+    local reject_pos rule_line need_add=false
+    reject_pos=$(iptables -L INPUT --line-numbers -n 2>/dev/null | \
+      awk '/REJECT|DROP/{print $1; exit}')
+    rule_line=$(iptables -L INPUT --line-numbers -n 2>/dev/null | \
+      awk -v p="${port}" '$0 ~ "dpt:"p && /ACCEPT/{print $1; exit}')
+
+    if [[ -z "${rule_line}" ]]; then
+      need_add=true
+    elif [[ -n "${reject_pos}" && "${rule_line}" -gt "${reject_pos}" ]]; then
+      log_warn "iptables：${port}/tcp 规则位于 REJECT 之后（无效），重新插入..."
+      iptables -D INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || true
+      need_add=true
+    fi
+
+    if [[ "${need_add}" == true ]]; then
       log_info "检测到 iptables，添加 ${port}/tcp ACCEPT 规则..."
-      if iptables -A INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null; then
+      local insert_ok=false
+      if [[ -n "${reject_pos}" ]]; then
+        iptables -I INPUT "${reject_pos}" -p tcp --dport "${port}" -j ACCEPT \
+          2>/dev/null && insert_ok=true
+      else
+        iptables -A INPUT -p tcp --dport "${port}" -j ACCEPT \
+          2>/dev/null && insert_ok=true
+      fi
+
+      if [[ "${insert_ok}" == true ]]; then
         _record_fw_rule "iptables" "${port}" "tcp" \
-          "iptables -A INPUT -p tcp --dport ${port} -j ACCEPT"
-        log_info "iptables：${port}/tcp 已放行"
+          "iptables -I INPUT -p tcp --dport ${port} -j ACCEPT"
+        log_info "iptables：${port}/tcp 已放行（插入位置：${reject_pos:-末尾}）"
+        netfilter-persistent save >/dev/null 2>&1 || \
+          iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         any_added=true
       else
         log_warn "iptables 规则添加失败，请手动放行端口 ${port}/tcp"
       fi
     else
-      log_info "iptables：${port}/tcp 规则已存在，无需添加"
+      log_info "iptables：${port}/tcp 规则已存在且有效"
       any_added=true
     fi
   fi
