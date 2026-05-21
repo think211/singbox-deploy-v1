@@ -83,6 +83,7 @@ PUBLIC_KEY=""
 SHORT_ID=""
 IPV4_ADDR=""
 IPV6_ADDR=""
+DOMAIN_STRATEGY="prefer_ipv4"
 SB_ARCH=""
 
 # ==============================================================
@@ -331,10 +332,12 @@ detect_ip() {
         log_info "IPv6 不可用，降级为 0.0.0.0 监听"
       fi
     fi
+    DOMAIN_STRATEGY="prefer_ipv4"
   else
     # 纯 IPv6 VPS
     SERVER_IP="${IPV6_ADDR}"
     LISTEN_ADDR="::"
+    DOMAIN_STRATEGY="prefer_ipv6"
     log_info "纯 IPv6 VPS，SERVER_IP 使用 IPv6"
   fi
 
@@ -701,6 +704,8 @@ generate_server_config() {
   "inbounds": [
     {
       "type": "vless",
+      "sniff": true,
+      "sniff_override_destination": true,
       "tag": "vless-in",
       "listen": "${LISTEN_ADDR}",
       "listen_port": ${LISTEN_PORT},
@@ -720,20 +725,16 @@ generate_server_config() {
             "server_port": 443
           },
           "private_key": "${PRIVATE_KEY}",
-          "short_id": [
-            "${SHORT_ID}",
-            ""
-          ],
-          "max_time_difference": "1m"
+          "short_id": ["${SHORT_ID}"]
         }
-      },
-      "tcp_fast_open": true
+      }
     }
   ],
   "outbounds": [
     {
       "type": "direct",
-      "tag": "direct"
+      "tag": "direct",
+      "domain_strategy": "${DOMAIN_STRATEGY}"
     },
     {
       "type": "block",
@@ -772,7 +773,7 @@ _build_vless_link() {
     addr="[${addr}]"
   fi
   local tag="SB-${addr}:${LISTEN_PORT}"
-  echo "vless://${UUID_VAL}@${addr}:${LISTEN_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=random&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${tag}"
+  echo "vless://${UUID_VAL}@${addr}:${LISTEN_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${tag}"
 }
 
 generate_client_configs() {
@@ -838,7 +839,7 @@ generate_client_configs() {
         "server_name": "${SNI}",
         "utls": {
           "enabled": true,
-          "fingerprint": "random"
+          "fingerprint": "chrome"
         },
         "reality": {
           "enabled": true,
@@ -916,7 +917,7 @@ proxies:
     reality-opts:
       public-key: ${PUBLIC_KEY}
       short-id: ${SHORT_ID}
-    client-fingerprint: random
+    client-fingerprint: chrome
 
 proxy-groups:
   - name: Proxy
