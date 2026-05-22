@@ -84,7 +84,6 @@ SHORT_ID=""
 IPV4_ADDR=""
 IPV6_ADDR=""
 SB_ARCH=""
-DOMAIN_STRATEGY="prefer_ipv4"
 
 # ==============================================================
 # §0  日志基础设施
@@ -94,22 +93,32 @@ _ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
 log_info()  {
   echo -e "${GREEN}[✓]${NC} $*"
-  echo "[$(_ts)] INFO  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] INFO  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  fi
 }
 log_warn()  {
   echo -e "${YELLOW}[!]${NC} $*"
-  echo "[$(_ts)] WARN  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] WARN  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  fi
 }
 log_error() {
   echo -e "${RED}[✗]${NC} $*" >&2
-  echo "[$(_ts)] ERROR $*" >> "${ERROR_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] ERROR $*" >> "${ERROR_LOG}" 2>/dev/null || true
+  fi
 }
 log_step()  {
   echo -e "\n${BOLD}${BLUE}━━ $* ━━${NC}"
-  echo "[$(_ts)] STEP  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] STEP  $*" >> "${INSTALL_LOG}" 2>/dev/null || true
+  fi
 }
 log_audit() {
-  echo "[$(_ts)] AUDIT $*" >> "${AUDIT_LOG}" 2>/dev/null || true
+  if [[ -d "${LOG_DIR}" ]]; then
+    echo "[$(_ts)] AUDIT $*" >> "${AUDIT_LOG}" 2>/dev/null || true
+  fi
 }
 
 # 脱敏：UUID 前4后4可见
@@ -215,7 +224,7 @@ check_and_install_deps() {
   log_step "检测并安装依赖"
 
   local missing=()
-  for cmd in curl tar gzip openssl jq; do
+  for cmd in curl tar gzip openssl; do
     if ! command -v "${cmd}" &>/dev/null; then
       missing+=("${cmd}")
     fi
@@ -322,12 +331,10 @@ detect_ip() {
         log_info "IPv6 不可用，降级为 0.0.0.0 监听"
       fi
     fi
-    DOMAIN_STRATEGY="prefer_ipv4"
   else
     # 纯 IPv6 VPS
     SERVER_IP="${IPV6_ADDR}"
     LISTEN_ADDR="::"
-    DOMAIN_STRATEGY="prefer_ipv6"
     log_info "纯 IPv6 VPS，SERVER_IP 使用 IPv6"
   fi
 
@@ -461,10 +468,10 @@ prompt_sni() {
 
   echo -e "\n${CYAN}Reality SNI 是 sing-box 用于伪装流量的目标 HTTPS 站点域名。${NC}"
   echo -e "要求：真实可访问的 HTTPS 站点，支持 TLS 1.3，境外大厂为佳。"
-  echo -e "推荐：${BOLD}apple.com${NC}（默认）、www.microsoft.com、www.cloudflare.com"
+  echo -e "推荐：${BOLD}www.apple.com${NC}（默认）、www.microsoft.com、www.cloudflare.com"
   echo ""
 
-  local default_sni="apple.com"
+  local default_sni="www.apple.com"
 
   while true; do
     echo -ne "请输入 Reality SNI（直接回车使用默认值 ${BOLD}${default_sni}${NC}）："
@@ -485,9 +492,17 @@ prompt_sni() {
 # §5  sing-box 下载与安装
 # ==============================================================
 
-_get_target_stable_version() {
-  # M1 只更新到脚本已验证的固定版本，不自动追 GitHub latest。
-  echo "${SB_PINNED_VERSION}"
+_get_latest_stable_version() {
+  # 从 GitHub Releases API 获取最新非预发布版本
+  local latest
+  latest=$(curl -s --max-time 15 \
+    "https://api.github.com/repos/SagerNet/sing-box/releases" 2>/dev/null | \
+    grep '"tag_name"' | \
+    grep -v '"tag_name": "v.*-\(alpha\|beta\|rc\)' | \
+    head -1 | \
+    sed 's/.*"v\([^"]*\)".*/\1/') 2>/dev/null || true
+
+  echo "${latest:-${SB_PINNED_VERSION}}"
 }
 
 download_singbox() {
@@ -660,11 +675,6 @@ load_credentials() {
   IPV4_ADDR=$(curl -4 -s --max-time 8 "https://api4.ipify.org" 2>/dev/null || echo "")
   IPV6_ADDR=$(curl -6 -s --max-time 8 "https://api6.ipify.org" 2>/dev/null || echo "")
   SERVER_IP="${IPV4_ADDR:-${IPV6_ADDR}}"
-  if [[ -n "${IPV4_ADDR}" ]]; then
-    DOMAIN_STRATEGY="prefer_ipv4"
-  else
-    DOMAIN_STRATEGY="prefer_ipv6"
-  fi
 }
 
 # ==============================================================
@@ -691,8 +701,6 @@ generate_server_config() {
   "inbounds": [
     {
       "type": "vless",
-      "sniff": true,
-      "sniff_override_destination": true,
       "tag": "vless-in",
       "listen": "${LISTEN_ADDR}",
       "listen_port": ${LISTEN_PORT},
@@ -713,17 +721,19 @@ generate_server_config() {
           },
           "private_key": "${PRIVATE_KEY}",
           "short_id": [
-            "${SHORT_ID}"
-          ]
+            "${SHORT_ID}",
+            ""
+          ],
+          "max_time_difference": "1m"
         }
-      }
+      },
+      "tcp_fast_open": true
     }
   ],
   "outbounds": [
     {
       "type": "direct",
-      "tag": "direct",
-      "domain_strategy": "${DOMAIN_STRATEGY}"
+      "tag": "direct"
     },
     {
       "type": "block",
@@ -762,7 +772,7 @@ _build_vless_link() {
     addr="[${addr}]"
   fi
   local tag="SB-${addr}:${LISTEN_PORT}"
-  echo "vless://${UUID_VAL}@${addr}:${LISTEN_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${tag}"
+  echo "vless://${UUID_VAL}@${addr}:${LISTEN_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=random&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${tag}"
 }
 
 generate_client_configs() {
@@ -785,6 +795,28 @@ generate_client_configs() {
   "log": {
     "level": "info"
   },
+  "dns": {
+    "servers": [
+      {
+        "tag": "dns-direct",
+        "address": "https://dns.alidns.com/dns-query",
+        "detour": "direct"
+      },
+      {
+        "tag": "dns-proxy",
+        "address": "https://dns.cloudflare.com/dns-query",
+        "detour": "vless-out"
+      }
+    ],
+    "rules": [
+      {
+        "geosite": ["cn"],
+        "server": "dns-direct"
+      }
+    ],
+    "final": "dns-proxy",
+    "strategy": "prefer_ipv4"
+  },
   "inbounds": [
     {
       "type": "mixed",
@@ -806,7 +838,7 @@ generate_client_configs() {
         "server_name": "${SNI}",
         "utls": {
           "enabled": true,
-          "fingerprint": "chrome"
+          "fingerprint": "random"
         },
         "reality": {
           "enabled": true,
@@ -829,6 +861,14 @@ generate_client_configs() {
       {
         "ip_is_private": true,
         "outbound": "direct"
+      },
+      {
+        "geosite": ["cn"],
+        "outbound": "direct"
+      },
+      {
+        "geoip": ["cn"],
+        "outbound": "direct"
       }
     ],
     "final": "vless-out"
@@ -845,6 +885,23 @@ mixed-port: 7890
 allow-lan: false
 mode: rule
 log-level: info
+ipv6: false
+
+dns:
+  enable: true
+  listen: 127.0.0.1:1053
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+  nameserver-policy:
+    "geosite:cn": [https://dns.alidns.com/dns-query, https://doh.pub/dns-query]
+    "geosite:geolocation-!cn": [https://dns.cloudflare.com/dns-query, https://dns.google/dns-query]
 
 proxies:
   - name: "${node_name}"
@@ -859,7 +916,7 @@ proxies:
     reality-opts:
       public-key: ${PUBLIC_KEY}
       short-id: ${SHORT_ID}
-    client-fingerprint: chrome
+    client-fingerprint: random
 
 proxy-groups:
   - name: Proxy
@@ -874,6 +931,8 @@ rules:
   - IP-CIDR,192.168.0.0/16,DIRECT
   - IP-CIDR,127.0.0.0/8,DIRECT
   - GEOIP,private,DIRECT
+  - GEOSITE,cn,DIRECT
+  - GEOIP,cn,DIRECT
   - MATCH,Proxy
 EOF
 
@@ -986,20 +1045,46 @@ configure_firewall() {
     fi
   fi
 
-  # ── iptables（仅在未检测到上述防火墙时尝试）──────────────
-  if [[ "${any_added}" == false ]] && command -v iptables &>/dev/null; then
-    if ! iptables -C INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null; then
+  # ── iptables（总是执行，确保 ACCEPT 插入到 REJECT/DROP 之前）──────────────
+  # Oracle Cloud 等厂商默认存在 REJECT/DROP 兜底规则，-A 追加到末尾会被提前拦截
+  if command -v iptables &>/dev/null; then
+    local reject_pos rule_line need_add=false
+    reject_pos=$(iptables -L INPUT --line-numbers -n 2>/dev/null | \
+      awk '/REJECT|DROP/{print $1; exit}')
+    rule_line=$(iptables -L INPUT --line-numbers -n 2>/dev/null | \
+      awk -v p="${port}" '$0 ~ "dpt:"p && /ACCEPT/{print $1; exit}')
+
+    if [[ -z "${rule_line}" ]]; then
+      need_add=true
+    elif [[ -n "${reject_pos}" && "${rule_line}" -gt "${reject_pos}" ]]; then
+      log_warn "iptables：${port}/tcp 规则位于 REJECT 之后（无效），重新插入..."
+      iptables -D INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || true
+      need_add=true
+    fi
+
+    if [[ "${need_add}" == true ]]; then
       log_info "检测到 iptables，添加 ${port}/tcp ACCEPT 规则..."
-      if iptables -A INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null; then
+      local insert_ok=false
+      if [[ -n "${reject_pos}" ]]; then
+        iptables -I INPUT "${reject_pos}" -p tcp --dport "${port}" -j ACCEPT \
+          2>/dev/null && insert_ok=true
+      else
+        iptables -A INPUT -p tcp --dport "${port}" -j ACCEPT \
+          2>/dev/null && insert_ok=true
+      fi
+
+      if [[ "${insert_ok}" == true ]]; then
         _record_fw_rule "iptables" "${port}" "tcp" \
-          "iptables -A INPUT -p tcp --dport ${port} -j ACCEPT"
-        log_info "iptables：${port}/tcp 已放行"
+          "iptables -I INPUT -p tcp --dport ${port} -j ACCEPT"
+        log_info "iptables：${port}/tcp 已放行（插入位置：${reject_pos:-末尾}）"
+        netfilter-persistent save >/dev/null 2>&1 || \
+          iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         any_added=true
       else
         log_warn "iptables 规则添加失败，请手动放行端口 ${port}/tcp"
       fi
     else
-      log_info "iptables：${port}/tcp 规则已存在，无需添加"
+      log_info "iptables：${port}/tcp 规则已存在且有效"
       any_added=true
     fi
   fi
@@ -1040,6 +1125,8 @@ _remove_single_fw_rule() {
           iptables -D INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null && \
             log_info "iptables 规则已移除：${port}/${proto}" || \
             log_warn "iptables 规则移除失败：${port}/${proto}"
+          netfilter-persistent save >/dev/null 2>&1 || \
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         fi
       fi
       ;;
@@ -1090,7 +1177,8 @@ create_systemd_service() {
 [Unit]
 Description=sing-box proxy service
 Documentation=https://sing-box.sagernet.org/
-After=network.target nss-lookup.target
+After=network.target network-online.target nss-lookup.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -1382,37 +1470,32 @@ menu_update_singbox() {
 
   local current_ver
   current_ver=$("${BIN_PATH}" version 2>/dev/null | \
-    grep -oP 'sing-box version \K[\d.]+' || echo "")
-  log_info "当前版本：${current_ver:+v}${current_ver:-未知}"
+    grep -oP 'sing-box version \K[\d.]+' || echo "未知")
+  log_info "当前版本：v${current_ver}"
 
-  local target_ver
-  target_ver=$(_get_target_stable_version)
-  log_info "脚本已验证稳定版本：v${target_ver}"
+  log_info "正在检查 GitHub 最新稳定版本..."
+  local latest_ver
+  latest_ver=$(_get_latest_stable_version)
+  log_info "最新稳定版本：v${latest_ver}"
 
-  if [[ "${current_ver}" == "${target_ver}" ]]; then
-    log_info "已是脚本已验证稳定版本（v${target_ver}），无需更新"
+  if [[ "${current_ver}" == "${latest_ver}" ]]; then
+    log_info "已是最新稳定版本（v${latest_ver}），无需更新"
     return 0
   fi
 
   echo ""
-  echo -e "  当前版本：${current_ver:+v}${current_ver:-未知}"
-  echo -e "  目标版本：v${target_ver}（脚本已验证稳定版）"
+  echo -e "  当前版本：v${current_ver}"
+  echo -e "  可更新到：v${latest_ver}（已测试稳定版）"
   echo ""
-  echo -ne "确认更新到 v${target_ver}？[y/N]："
+  echo -ne "确认更新到 v${latest_ver}？[y/N]："
   read -r confirm
   [[ "${confirm}" =~ ^[Yy]$ ]] || { echo "已取消更新"; return 0; }
 
+  # 备份
   local arch="${SB_ARCH}"
   if [[ -z "${arch}" ]]; then
     arch=$(uname -m)
-    case "${arch}" in
-      x86_64)  arch="amd64" ;;
-      aarch64) arch="arm64" ;;
-      *)
-        log_error "不支持的 CPU 架构：${arch}"
-        return ${E_ARCH}
-        ;;
-    esac
+    [[ "${arch}" == "x86_64" ]] && arch="amd64" || arch="arm64"
   fi
 
   mkdir -p "${BACKUP_DIR}"
@@ -1420,64 +1503,31 @@ menu_update_singbox() {
   [[ -f "${SERVER_JSON}" ]] && cp "${SERVER_JSON}" "${BACKUP_DIR}/server.json.bak"
   log_audit "更新前备份完成"
 
-  local filename="sing-box-${target_ver}-linux-${arch}"
+  # 下载新版
+  local filename="sing-box-${latest_ver}-linux-${arch}"
   local tarball="${filename}.tar.gz"
-  local base_url="https://github.com/SagerNet/sing-box/releases/download/v${target_ver}"
-  local url="${base_url}/${tarball}"
-  local checksum_url="${base_url}/${tarball}.sha256sum"
+  local url="https://github.com/SagerNet/sing-box/releases/download/v${latest_ver}/${tarball}"
   local tmp_tar="${TMP_DIR}/${tarball}"
-  local tmp_sum="${TMP_DIR}/${tarball}.sha256sum"
 
   mkdir -p "${TMP_DIR}"
-  if ! curl -fL --max-time 180 --retry 3 --retry-delay 5 --progress-bar -o "${tmp_tar}" "${url}"; then
+  if ! curl -fL --max-time 180 --retry 3 --progress-bar -o "${tmp_tar}" "${url}"; then
     log_error "下载新版本失败，更新中止"
     return ${E_DOWNLOAD}
   fi
 
-  if curl -fL --max-time 30 --retry 2 -s -o "${tmp_sum}" "${checksum_url}" 2>/dev/null; then
-    log_info "正在校验文件完整性（sha256）..."
-    local expected actual
-    expected=$(grep "[[:space:]]${tarball}\$" "${tmp_sum}" 2>/dev/null | awk '{print $1}')
-    actual=$(sha256sum "${tmp_tar}" | awk '{print $1}')
-
-    if [[ -z "${expected}" ]]; then
-      log_warn "未能从校验文件中提取预期哈希，跳过校验"
-    elif [[ "${expected}" != "${actual}" ]]; then
-      log_error "文件校验失败（预期：${expected}，实际：${actual}）"
-      rm -f "${tmp_tar}" "${tmp_sum}"
-      return ${E_VERIFY}
-    else
-      log_info "sha256 校验通过"
-    fi
-  else
-    log_warn "无法下载校验文件，跳过 sha256 校验（建议手动核对哈希）"
-  fi
-
-  if ! tar -xzf "${tmp_tar}" -C "${TMP_DIR}" 2>/dev/null; then
-    log_error "解压新版本失败，更新中止"
-    rm -f "${tmp_tar}" "${tmp_sum}"
-    return ${E_DOWNLOAD}
-  fi
-
+  tar -xzf "${tmp_tar}" -C "${TMP_DIR}"
   local new_bin="${TMP_DIR}/${filename}/sing-box"
-  if [[ ! -f "${new_bin}" ]]; then
-    log_error "下载包中未找到 sing-box 二进制，更新中止"
-    rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" "${tmp_sum}"
-    return ${E_DOWNLOAD}
-  fi
   chmod +x "${new_bin}"
 
-  if [[ -f "${SERVER_JSON}" ]]; then
-    log_info "检查目标版本与当前配置的兼容性..."
-    if ! "${new_bin}" check -c "${SERVER_JSON}" 2>/dev/null; then
-      log_error "目标版本（v${target_ver}）与当前配置不兼容，更新中止，旧版本保留"
-      rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" "${tmp_sum}"
-      return ${E_CONFIG}
-    fi
-  else
-    log_warn "未找到当前服务端配置，跳过配置兼容性检查"
+  # 配置兼容性检查（新版二进制 check 旧配置）
+  log_info "检查新版本与当前配置的兼容性..."
+  if ! "${new_bin}" check -c "${SERVER_JSON}" 2>/dev/null; then
+    log_error "新版本（v${latest_ver}）与当前配置不兼容，更新中止，旧版本保留"
+    rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}"
+    return ${E_CONFIG}
   fi
 
+  # 替换二进制
   systemctl stop sing-box 2>/dev/null || true
   install -m 755 "${new_bin}" "${BIN_PATH}"
   systemctl start sing-box 2>/dev/null
@@ -1485,18 +1535,16 @@ menu_update_singbox() {
 
   if systemctl is-active --quiet sing-box; then
     log_info "更新成功！当前版本：$("${BIN_PATH}" version 2>/dev/null | head -1)"
-    log_audit "sing-box 更新到 v${target_ver}"
+    log_audit "sing-box 更新到 v${latest_ver}"
   else
     log_error "更新后服务未正常启动，正在回滚..."
     [[ -f "${BACKUP_DIR}/sing-box.bak" ]] && install -m 755 "${BACKUP_DIR}/sing-box.bak" "${BIN_PATH}"
     [[ -f "${BACKUP_DIR}/server.json.bak" ]] && cp "${BACKUP_DIR}/server.json.bak" "${SERVER_JSON}"
     systemctl start sing-box 2>/dev/null || true
-    log_warn "已回滚到旧版本 ${current_ver:+v}${current_ver:-未知}"
-    rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" "${tmp_sum}" 2>/dev/null || true
-    return ${E_SERVICE}
+    log_warn "已回滚到旧版本 v${current_ver}"
   fi
 
-  rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" "${tmp_sum}" 2>/dev/null || true
+  rm -rf "${TMP_DIR:?}/${filename}" "${tmp_tar}" 2>/dev/null || true
 }
 
 menu_change_port() {
@@ -1735,20 +1783,24 @@ menu_backup() {
 menu_restore_backup() {
   log_step "恢复上一个备份"
 
-  if [[ ! -f "${BACKUP_DIR}/server.json.bak" ]]; then
-    log_error "未找到备份（${BACKUP_DIR}/server.json.bak 不存在）"
+  local latest_snapshot
+  latest_snapshot=$(ls -dt "${BACKUP_DIR}"/snapshot_* 2>/dev/null | head -1)
+
+  if [[ -z "${latest_snapshot}" ]]; then
+    log_error "未找到备份快照（${BACKUP_DIR}/snapshot_* 不存在，请先使用菜单 15 创建备份）"
     return 1
   fi
 
-  echo -ne "确认恢复到上一个备份？当前配置将被覆盖。[y/N]："
+  echo -e "将恢复的备份：$(basename "${latest_snapshot}")"
+  echo -ne "确认恢复？当前配置将被覆盖。[y/N]："
   read -r confirm
   [[ "${confirm}" =~ ^[Yy]$ ]] || { echo "已取消"; return 0; }
 
   systemctl stop sing-box 2>/dev/null || true
 
-  cp "${BACKUP_DIR}/server.json.bak"  "${SERVER_JSON}"  2>/dev/null || true
-  cp "${BACKUP_DIR}/vless.json.bak"   "${VLESS_CRED}"   2>/dev/null || true
-  cp "${BACKUP_DIR}/reality.json.bak" "${REALITY_CRED}" 2>/dev/null || true
+  [[ -f "${latest_snapshot}/server.json" ]]  && cp "${latest_snapshot}/server.json"  "${SERVER_JSON}"  2>/dev/null || true
+  [[ -f "${latest_snapshot}/vless.json" ]]   && cp "${latest_snapshot}/vless.json"   "${VLESS_CRED}"   2>/dev/null || true
+  [[ -f "${latest_snapshot}/reality.json" ]] && cp "${latest_snapshot}/reality.json" "${REALITY_CRED}" 2>/dev/null || true
 
   if ! "${BIN_PATH}" check -c "${SERVER_JSON}" 2>/dev/null; then
     log_error "备份配置校验失败，请手动检查 ${SERVER_JSON}"
@@ -1759,8 +1811,8 @@ menu_restore_backup() {
   sleep 2
 
   if systemctl is-active --quiet sing-box; then
-    log_info "备份已恢复，服务已重启"
-    log_audit "从备份恢复配置"
+    log_info "备份已恢复（$(basename "${latest_snapshot}")），服务已重启"
+    log_audit "从备份快照恢复配置：${latest_snapshot}"
   else
     log_error "恢复后服务未能启动，请检查日志"
     return ${E_SERVICE}
@@ -1790,6 +1842,14 @@ do_uninstall() {
 
   # 回收防火墙规则（仅删除 state 文件中记录的规则）
   [[ -f "${FW_STATE}" ]] && remove_firewall_rules || true
+
+  # 清理 BBR sysctl 配置（仅删除本脚本写入的行）
+  if grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null || \
+     grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
+    sed -i '/^net\.core\.default_qdisc=fq$/d' /etc/sysctl.conf 2>/dev/null || true
+    sed -i '/^net\.ipv4\.tcp_congestion_control=bbr$/d' /etc/sysctl.conf 2>/dev/null || true
+    log_info "已清理 BBR sysctl 配置"
+  fi
 
   # 删除文件
   rm -f "${BIN_PATH}" 2>/dev/null || log_warn "删除 ${BIN_PATH} 失败"
